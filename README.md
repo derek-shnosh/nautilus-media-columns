@@ -2,6 +2,12 @@
 
 Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (GNOME Files) list view for images and videos — cached for performance and fully GNOME-native. Nautilus already has access to this metadata, but does not expose it in list view.
 
+<p align="center">
+  <img src="assets/media-columns.png" width="80%" alt="Media Columns Example">
+</p>
+
+***
+
 ## Features
 
 - **Dimensions**
@@ -11,6 +17,8 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - **FPS** (videos)
 - **Persistent cache** (SQLite, keyed by path + mtime + size)
 - **No additional dependencies required** beyond a standard GNOME desktop environment — this extension uses GNOME’s existing GStreamer and GdkPixbuf libraries already shipped with GNOME; there is no `ffmpeg` dependency
+
+---
 
 ## Requirements
 
@@ -30,6 +38,8 @@ Tested on:
 Expected to work on:
 - Nautilus versions that ship nautilus-python API 4.0 (GNOME 45+)
 
+---
+
 ## Installation (per user)
 
 ```bash
@@ -44,6 +54,8 @@ Restart Nautilus, switch to **List View**, open **Visible Columns**, and enable:
 - Duration
 - FPS
 
+---
+
 ## Cache Location
 
 Persistent cache is stored at:
@@ -54,6 +66,8 @@ Persistent cache is stored at:
 
 Safe to delete at any time; it will be recreated automatically.
 
+---
+
 ## Supported Formats
 
 **Images**
@@ -63,11 +77,15 @@ Safe to delete at any time; it will be recreated automatically.
 - MP4, MKV, MOV, AVI, WebM, M4V  
 (Actual codec support depends on installed GStreamer plugins.)
 
+---
+
 ## Performance Notes
 
 - First visit to a folder may probe uncached files
 - Subsequent visits are instant
 - Files are only re-parsed if **mtime or size changes**
+
+---
 
 ## Compatibility Notes
 
@@ -79,6 +97,8 @@ If your system loads Python extensions from:
 ```
 
 ... it is compatible.
+
+---
 
 ## License
 
