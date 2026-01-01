@@ -34,6 +34,7 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - Python 3
 - Nautilus with **nautilus-python (API 4.0)**
 - GStreamer (installed by default on GNOME desktops)
+- ***Recommended***: **GExiv2 GI bindings** (package name varies by distro, e.g. `gir1.2-gexiv2-*`) for richer image metadata; otherwise the extension falls back to GdkPixbuf with reduced metadata.
 
 ```bash
 # If nautilus-python is not installed...
@@ -111,6 +112,10 @@ Cache behavior:
 - **No duration or FPS for some videos?**
   - Codec support depends on installed GStreamer plugins.
   - You may need additional packages (e.g. `gstreamer1.0-libav`, `gstreamer1.0-plugins-ugly`).
+
+- **Images show no dimensions or limited metadata?**
+  - The extension prefers **GExiv2** for image metadata; if unavailable, it falls back to **GdkPixbuf** with reduced metadata.
+  - You may need to install the **GExiv2 GI bindings** (package name varies by distro, e.g. `gir1.2-gexiv2-*`).
 
 ---
 
