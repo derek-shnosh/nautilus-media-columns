@@ -17,7 +17,7 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - **FPS (Framerate)** (videos, rounded to whole numbers)
 - **Persistent cache**
   - SQLite (WAL mode)
-  - Keyed by path + mtime + size
+  - Indexed by path; invalidated when mtime or size changes
   - Automatic pruning:
     - Time-based TTL: 90 days since last access
     - Size-based cap: 50,000 rows (least-recently-used)
@@ -45,7 +45,7 @@ Tested on:
 - Ubuntu 25.04
 
 Expected to work on:
-- Nautilus versions shipping nautilus-python API 4.0 (GNOME 45+)
+- Targets nautilus-python API 4.0 (GNOME 45+); expected to work but not guaranteed across all distros.
 
 ---
 
@@ -98,7 +98,7 @@ Cache behavior:
 
 - First visit to a folder may probe uncached files
 - Subsequent visits are instant
-- Probing never blocks Nautilus UI
+- Probing is best-effort and cached; some files may take longer on first access.
 
 ## License
 
