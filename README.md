@@ -100,6 +100,20 @@ Cache behavior:
 - Subsequent visits are instant
 - Probing is best-effort and cached; some files may take longer on first access.
 
+---
+
+## Troubleshooting
+
+- **Columns not showing up?**
+  - Restart Nautilus: `nautilus -q`
+  - Ensure you are in **List View** and the columns are enabled via **Visible Columns**.
+
+- **No duration or FPS for some videos?**
+  - Codec support depends on installed GStreamer plugins.
+  - You may need additional packages (e.g. `gstreamer1.0-libav`, `gstreamer1.0-plugins-ugly`).
+
+---
+
 ## License
 
 MIT
