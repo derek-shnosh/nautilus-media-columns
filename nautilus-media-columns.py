@@ -35,31 +35,17 @@ except ImportError:
 # Logging
 _LOG_DOMAIN = "nautilus-media-columns"
 
+
 def log_info(msg):
-    GLib.log_default_handler(
-        _LOG_DOMAIN,
-        GLib.LogLevelFlags.LEVEL_MESSAGE,
-        msg,
-        None,
-    )
+    GLib.log_default_handler(_LOG_DOMAIN, GLib.LogLevelFlags.LEVEL_MESSAGE, msg, None)
 
 
 def log_warn(msg):
-    GLib.log_default_handler(
-        _LOG_DOMAIN,
-        GLib.LogLevelFlags.LEVEL_WARNING,
-        msg,
-        None,
-    )
+    GLib.log_default_handler(_LOG_DOMAIN, GLib.LogLevelFlags.LEVEL_WARNING, msg, None)
 
 
 def log_error(msg):
-    GLib.log_default_handler(
-        _LOG_DOMAIN,
-        GLib.LogLevelFlags.LEVEL_CRITICAL,
-        msg,
-        None,
-    )
+    GLib.log_default_handler(_LOG_DOMAIN, GLib.LogLevelFlags.LEVEL_CRITICAL, msg, None)
 
 
 # Initialize GStreamer
@@ -343,6 +329,7 @@ def _get_discoverer():
 
 class VideoMetadata(NamedTuple):
     """Container for probed video metadata returned by _probe_video()."""
+
     duration: str
     dimensions: str
     framerate: str
@@ -400,6 +387,7 @@ def _probe_video(path: str) -> VideoMetadata:
 
 class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvider):
     """Extension: Adds media metadata columns to Nautilus."""
+
     def __init__(self):
         super().__init__()
 
