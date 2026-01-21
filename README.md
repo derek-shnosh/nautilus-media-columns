@@ -34,6 +34,7 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - Python 3
 - Nautilus with **nautilus-python (API 4.0)**
 - GStreamer (installed by default on GNOME desktops)
+- GstPbutils GI typelib (needed for video probing / GStreamer discoverer); on Ubuntu/Debian install `gir1.2-gst-plugins-base-1.0`.
 - ***Recommended***: **GExiv2 GI bindings** (package name varies by distro, e.g. `gir1.2-gexiv2-*`) for richer image metadata; otherwise the extension falls back to GdkPixbuf with reduced metadata.
 
 ```bash
@@ -42,11 +43,11 @@ sudo apt update && sudo apt install python3-nautilus -y
 ```
 
 Tested on:
-- GNOME / Nautilus 48
-- Ubuntu 25.04
+- GNOME / Nautilus 48 & 49
+- Ubuntu 25.04 & 25.10
 
 Expected to work on:
-- Targets nautilus-python API 4.0 (GNOME 45+); expected to work but not guaranteed across all distros.
+- Targets nautilus-python API 4.0 (GNOME 45+); expected to work across distros, but dependency packaging may vary.
 
 ---
 
@@ -106,6 +107,8 @@ Cache behavior:
 ## Troubleshooting
 
 - **Columns not showing up?**
+  - `ValueError: Namespace GstPbutils not available`
+    - Install the GStreamer GI typelib for `GstPbutils` (Ubuntu/Debian: `gir1.2-gst-plugins-base-1.0`).
   - Restart Nautilus: `nautilus -q`
   - Ensure you are in **List View** and the columns are enabled via **Visible Columns**.
 
