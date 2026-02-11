@@ -122,6 +122,39 @@ Cache behavior:
 
 ---
 
+## Debug Logging
+
+### View normal logs
+
+```bash
+journalctl --user -f -t nautilus-media-columns
+```
+
+Shows:
+- INFO
+- WARNING
+- ERROR
+
+### Enable debug logging
+
+```bash
+G_MESSAGES_DEBUG=nautilus-media-columns nautilus
+journalctl --user -f -t nautilus-media-columns -p debug
+```
+
+### View debug output directly in terminal
+
+```bash
+G_MESSAGES_DEBUG=nautilus-media-columns nautilus 2>&1 | grep -i nautilus-media-columns
+```
+
+### Notes
+
+- Debug logging is disabled by default.
+- Debug logs include cache activity, media probing details, database lifecycle events, and GStreamer diagnostics.
+
+---
+
 ## License
 
 MIT

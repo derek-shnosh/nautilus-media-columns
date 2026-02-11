@@ -33,19 +33,62 @@ except ImportError:
 
 
 # Logging
+import logging
+
 _LOG_DOMAIN = "nautilus-media-columns"
+JOURNAL_AVAILABLE = False
+
+_debug_env = (GLib.getenv("G_MESSAGES_DEBUG") or "").strip()
+_DEBUG_ENABLED = _debug_env == "all" or _LOG_DOMAIN in _debug_env.split(",")
+
+try:
+    from systemd.journal import JournalHandler
+
+    _journal_logger = logging.getLogger(_LOG_DOMAIN)
+    _journal_logger.setLevel(logging.DEBUG)
+
+    journal_handler = JournalHandler(SYSLOG_IDENTIFIER=_LOG_DOMAIN)
+    journal_handler.setLevel(logging.DEBUG)
+    journal_handler.setFormatter(
+        logging.Formatter("[%(levelname)s] %(message)s")
+    )
+
+    _journal_logger.addHandler(journal_handler)
+
+    JOURNAL_AVAILABLE = True
+except ImportError:
+    pass
+
+
+def _journal(level, msg):
+    if JOURNAL_AVAILABLE and (level != logging.DEBUG or _DEBUG_ENABLED):
+        _journal_logger.log(level, msg)
+
+
+def _glib_log(level_flag, msg):
+    GLib.log_default_handler(_LOG_DOMAIN, level_flag, msg, None)
+
+
+def log_debug(msg):
+    if not _DEBUG_ENABLED:
+        return
+    _glib_log(GLib.LogLevelFlags.LEVEL_DEBUG, msg)
+    _journal(logging.DEBUG, msg)
 
 
 def log_info(msg):
-    GLib.log_default_handler(_LOG_DOMAIN, GLib.LogLevelFlags.LEVEL_MESSAGE, msg, None)
+    _glib_log(GLib.LogLevelFlags.LEVEL_MESSAGE, msg)
+    _journal(logging.INFO, msg)
 
 
 def log_warn(msg):
-    GLib.log_default_handler(_LOG_DOMAIN, GLib.LogLevelFlags.LEVEL_WARNING, msg, None)
+    _glib_log(GLib.LogLevelFlags.LEVEL_WARNING, msg)
+    _journal(logging.WARNING, msg)
 
 
 def log_error(msg):
-    GLib.log_default_handler(_LOG_DOMAIN, GLib.LogLevelFlags.LEVEL_CRITICAL, msg, None)
+    _glib_log(GLib.LogLevelFlags.LEVEL_CRITICAL, msg)
+    _journal(logging.ERROR, msg)
 
 
 # Initialize GStreamer
@@ -97,13 +140,14 @@ def _get_db() -> sqlite3.Connection:
         return _DB
 
     pathlib.Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    log_info(f"Opening cache DB: {CACHE_DB}")
     conn = sqlite3.connect(CACHE_DB, timeout=DB_TIMEOUT_S)
     try:
         conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        log_debug(f"SQLite PRAGMA failed (non-fatal): {type(e).__name__}: {e}")
 
     conn.execute(
         """
@@ -121,10 +165,11 @@ def _get_db() -> sqlite3.Connection:
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(cache)").fetchall()}
         if "last_access_ns" not in cols:
+            log_info("Upgrading cache schema: adding last_access_ns")
             conn.execute("ALTER TABLE cache ADD COLUMN last_access_ns INTEGER NOT NULL DEFAULT 0")
             conn.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        log_debug(f"SQLite schema check/upgrade failed (non-fatal): {type(e).__name__}: {e}")
 
     _DB = conn
     _cache_prune(conn)
@@ -138,14 +183,16 @@ def _flush_and_close_db() -> None:
         return
     try:
         if _pending_writes:
+            log_debug(f"Flushing pending DB writes: {_pending_writes}")
             _DB.commit()
             _pending_writes = 0
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        log_warn(f"SQLite commit failed (non-fatal): {type(e).__name__}: {e}")
     try:
         _DB.close()
-    except sqlite3.Error:
-        pass
+        log_debug("Closed cache DB")
+    except sqlite3.Error as e:
+        log_warn(f"SQLite close failed (non-fatal): {type(e).__name__}: {e}")
     _DB = None
 
 
@@ -165,7 +212,9 @@ def _mem_cache_put(
     _MEM_CACHE[path] = (mtime_ns, size, dimensions, duration, framerate)
     if len(_MEM_CACHE) > _MEM_CACHE_MAX:
         # FIFO eviction (dict keeps insertion order in Python 3.7+)
-        _MEM_CACHE.pop(next(iter(_MEM_CACHE)), None)
+        evicted = next(iter(_MEM_CACHE))
+        _MEM_CACHE.pop(evicted, None)
+        log_debug(f"Mem-cache evicted: {evicted}")
 
 
 def _cache_get(path: str, mtime_ns: int, size: int) -> Optional[Tuple[str, str, str]]:
@@ -173,21 +222,31 @@ def _cache_get(path: str, mtime_ns: int, size: int) -> Optional[Tuple[str, str, 
     global _pending_writes
     cached = _MEM_CACHE.get(path)
     if cached and cached[0] == mtime_ns and cached[1] == size:
+        log_debug(f"Cache hit (mem): {path}")
         return cached[2], cached[3], cached[4]
+
     try:
         conn = _get_db()
         row = conn.execute(
             "SELECT mtime_ns,size,dims,dur,fps FROM cache WHERE path=?",
             (path,),
         ).fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        log_debug(f"Cache query failed (non-fatal): {type(e).__name__}: {e}")
         return None
-    if not row or int(row[0]) != mtime_ns or int(row[1]) != size:
+
+    if not row:
+        log_debug(f"Cache miss (db): {path}")
+        return None
+
+    if int(row[0]) != mtime_ns or int(row[1]) != size:
+        log_debug(f"Cache stale -> delete: {path}")
         try:
             conn.execute("DELETE FROM cache WHERE path=?", (path,))
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            log_debug(f"Cache stale delete failed (non-fatal): {type(e).__name__}: {e}")
         return None
+
     dimensions, duration, framerate = row[2] or "", row[3] or "", row[4] or ""
     try:
         conn.execute(
@@ -196,11 +255,14 @@ def _cache_get(path: str, mtime_ns: int, size: int) -> Optional[Tuple[str, str, 
         )
         _pending_writes += 1
         if _pending_writes >= COMMIT_EVERY:
+            log_debug(f"DB commit threshold reached: {_pending_writes}")
             conn.commit()
             _pending_writes = 0
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        log_debug(f"Cache last_access update failed (non-fatal): {type(e).__name__}: {e}")
+
     _mem_cache_put(path, mtime_ns, size, dimensions, duration, framerate)
+    log_debug(f"Cache hit (db): {path}")
     return dimensions, duration, framerate
 
 
@@ -224,10 +286,11 @@ def _cache_put(
         )
         _pending_writes += 1
         if _pending_writes >= COMMIT_EVERY:
+            log_debug(f"DB commit threshold reached: {_pending_writes}")
             conn.commit()
             _pending_writes = 0
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        log_debug(f"Cache put failed (non-fatal): {type(e).__name__}: {e}")
 
 
 def _cache_prune(conn: sqlite3.Connection) -> None:
@@ -250,9 +313,12 @@ def _cache_prune(conn: sqlite3.Connection) -> None:
         )
         deleted += max(0, delete_cursor.rowcount or 0)
         if deleted:
+            log_info(f"Cache pruned: {deleted} rows removed")
             _pending_writes += 1
-    except sqlite3.Error:
-        pass
+        else:
+            log_debug("Cache prune: no rows removed")
+    except sqlite3.Error as e:
+        log_debug(f"Cache prune failed (non-fatal): {type(e).__name__}: {e}")
 
 
 # Formatting
@@ -287,6 +353,7 @@ def _fmt_framerate_ratio(numerator: int, denominator: int) -> str:
 # Probers
 def _probe_image(path: str) -> str:
     """Read image dimensions without fully decoding the file."""
+    log_debug(f"Probe image: {path} (backend={IMAGE_BACKEND or 'none'})")
     if IMAGE_BACKEND == "GExiv2":
         try:
             metadata = GExiv2.Metadata.new()
@@ -302,15 +369,18 @@ def _probe_image(path: str) -> str:
                 GExiv2.Orientation.ROT_90_VFLIP,
             ):
                 width, height = height, width
+                log_debug("Image orientation swap applied")
             return f"{width}x{height}"
-        except (GLib.Error, ValueError):
+        except (GLib.Error, ValueError) as e:
+            log_debug(f"GExiv2 probe failed (non-fatal): {type(e).__name__}: {e}")
             return ""
 
     if IMAGE_BACKEND == "GdkPixbuf":
         try:
             _, width, height = GdkPixbuf.Pixbuf.get_file_info(path)
             return f"{width}x{height}" if width > 0 and height > 0 else ""
-        except GLib.Error:
+        except GLib.Error as e:
+            log_debug(f"GdkPixbuf probe failed (non-fatal): {type(e).__name__}: {e}")
             return ""
 
     return ""
@@ -322,7 +392,9 @@ def _get_discoverer():
     if _DISCOVERER is None:
         try:
             _DISCOVERER = GstPbutils.Discoverer.new(DISCOVER_TIMEOUT_NS)
-        except Exception:
+            log_info("Created GStreamer discoverer")
+        except Exception as e:
+            log_warn(f"Failed to create GStreamer discoverer: {type(e).__name__}: {e}")
             _DISCOVERER = None
     return _DISCOVERER
 
@@ -337,17 +409,24 @@ class VideoMetadata(NamedTuple):
 
 def _probe_video(path: str) -> VideoMetadata:
     """Read video duration, size, and framerate using GStreamer."""
+    log_debug(f"Probe video: {path}")
     uri = Gst.filename_to_uri(path)
     discoverer = _get_discoverer()
     if discoverer is None:
         return VideoMetadata("", "", "")
 
+    start_ns = time.time_ns()
     try:
         info = discoverer.discover_uri(uri)
-    except Exception:
+    except Exception as e:
         # GStreamer GI bindings can raise inconsistent exceptions.
         # Metadata is optional; never fail the file manager.
+        log_warn(f"GStreamer discover failed (non-fatal): {type(e).__name__}: {e}")
         return VideoMetadata("", "", "")
+    finally:
+        # Always record probe timing (runs even if discover_uri fails or returns early)
+        elapsed_ms = (time.time_ns() - start_ns) / 1_000_000
+        log_debug(f"GStreamer discover time: {elapsed_ms:.1f}ms")
 
     duration = _fmt_duration_ns(info.get_duration())
 
@@ -356,9 +435,10 @@ def _probe_video(path: str) -> VideoMetadata:
 
     try:
         streams = info.get_video_streams()
-    except Exception:
+    except Exception as e:
         # GI/C boundary: GStreamer introspection can vary by version/plugins.
         # Treat missing stream info as "no video streams" and keep Nautilus stable.
+        log_debug(f"get_video_streams failed (non-fatal): {type(e).__name__}: {e}")
         streams = []
 
     for stream in streams:
@@ -367,21 +447,22 @@ def _probe_video(path: str) -> VideoMetadata:
             height = stream.get_height()
             if width > 0 and height > 0:
                 dimensions = f"{width}x{height}"
-        except Exception:
+        except Exception as e:
             # GI/C boundary: stream fields can be unavailable for some demuxers/codecs.
-            pass
+            log_debug(f"Stream dimension read failed (non-fatal): {type(e).__name__}: {e}")
 
         try:
             framerate_num = stream.get_framerate_num()
             framerate_denom = stream.get_framerate_denom()
             if framerate_num and framerate_denom:
                 framerate = _fmt_framerate_ratio(framerate_num, framerate_denom)
-        except Exception:
+        except Exception as e:
             # GI/C boundary: framerate access may raise across plugin/ABI differences.
-            pass
+            log_debug(f"Stream framerate read failed (non-fatal): {type(e).__name__}: {e}")
 
         break
 
+    log_debug(f"Video probed -> dur='{duration}' dims='{dimensions}' fps='{framerate}'")
     return VideoMetadata(duration, dimensions, framerate)
 
 
@@ -390,6 +471,7 @@ class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvid
 
     def __init__(self):
         super().__init__()
+        log_info("nautilus-media-columns extension initialized")
 
     def get_columns(self):
         return [
@@ -416,23 +498,37 @@ class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvid
     # Called once per file by Nautilus
     def update_file_info(self, file: Nautilus.FileInfo, *_unused) -> None:
         """Fill in media columns for one file."""
+
+        # Only handle local filesystem URIs (skip smb://, trash://, etc.)
         if file.get_uri_scheme() != "file":
             return
+
+        # Resolve Nautilus FileInfo to a Gio.File
         location = file.get_location()
         if location is None:
-            return
+            return  # No resolvable location (virtual/search results)
+
+        # Convert Gio.File to a POSIX path
         path = location.get_path()
         if not path:
+            return  # Not backed by a real local path
+
+        # Only process regular files (excludes directories, symlinks to dirs, devices, etc.)
+        if not os.path.isfile(path):
             return
+
         _, ext = os.path.splitext(path)
         ext = ext.lower()
+
+        if ext not in SUPPORTED_EXTS:
+            if ext == "":
+                return  # skip extensionless files quietly
+            log_debug(f"Skip: unsupported ext '{ext}' ({path})")
+            return
 
         file.add_string_attribute("media_dimensions", "")
         file.add_string_attribute("media_duration", "")
         file.add_string_attribute("media_framerate", "")
-
-        if ext not in SUPPORTED_EXTS or not os.path.isfile(path):
-            return
 
         try:
             stat_result = os.stat(path)
