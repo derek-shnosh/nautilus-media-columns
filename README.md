@@ -13,7 +13,7 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - **Dimensions**
   - Images: fast header-only probe (no full decode)
   - Videos: via GStreamer discoverer
-- **Duration** (videos)
+- **Duration** (videos, audio)
 - **FPS (Framerate)** (videos, rounded to whole numbers)
 - **Persistent cache**
   - SQLite (WAL mode)
@@ -26,6 +26,8 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - **Image metadata**
   - Prefers GExiv2
   - Falls back to GdkPixbuf if GExiv2 is unavailable
+- **Audio metadata**
+  - Title, Length, Artist, Album, and Genre
 
 ---
 
@@ -36,6 +38,7 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - GStreamer (installed by default on GNOME desktops)
 - GstPbutils GI typelib (needed for video probing / GStreamer discoverer); on Ubuntu/Debian install `gir1.2-gst-plugins-base-1.0`.
 - ***Recommended***: **GExiv2 GI bindings** (package name varies by distro, e.g. `gir1.2-gexiv2-*`) for richer image metadata; otherwise the extension falls back to GdkPixbuf with reduced metadata.
+- Mutagen via `python3-mutagen`
 
 ```bash
 # If nautilus-python is not installed...
