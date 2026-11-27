@@ -15,6 +15,8 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
   - Videos: via GStreamer discoverer
 - **Duration** (videos)
 - **FPS (Framerate)** (videos, rounded to whole numbers)
+- **Non-blocking**
+  - Uncached files are probed during main-loop idle time; columns fill in progressively instead of freezing the window
 - **Persistent cache**
   - SQLite (WAL mode)
   - Indexed by path; invalidated when mtime or size changes
@@ -24,8 +26,10 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - **No ffmpeg dependency**
   - Videos use GNOME-provided GStreamer
 - **Image metadata**
-  - Prefers GExiv2
-  - Falls back to GdkPixbuf if GExiv2 is unavailable
+  - Prefers GExiv2 (orientation-aware)
+  - Falls back to GdkPixbuf per file if GExiv2 is unavailable or returns no dimensions
+- **Graceful degradation**
+  - Without GstPbutils, image columns still work; video columns are disabled
 
 ---
 
@@ -34,17 +38,25 @@ Adds **Dimensions**, **Duration**, and **FPS** (Framerate) columns to Nautilus (
 - Python 3
 - Nautilus with **nautilus-python (API 4.0)**
 - GStreamer (installed by default on GNOME desktops)
-- GstPbutils GI typelib (needed for video probing / GStreamer discoverer); on Ubuntu/Debian install `gir1.2-gst-plugins-base-1.0`.
-- ***Recommended***: **GExiv2 GI bindings** (package name varies by distro, e.g. `gir1.2-gexiv2-*`) for richer image metadata; otherwise the extension falls back to GdkPixbuf with reduced metadata.
+- ***Recommended***:
+  - **GstPbutils GI typelib**: required for video columns
+  - **GExiv2 GI bindings**: orientation-aware image dimensions; otherwise GdkPixbuf is used
+- ***Optional***:
+  - **python3-systemd**: sends logs to the journal under the `nautilus-media-columns` identifier (needed for the `journalctl -t` commands below)
+
+Debian / Ubuntu:
 
 ```bash
-# If nautilus-python is not installed...
-sudo apt update && sudo apt install python3-nautilus -y
+sudo apt update
+sudo apt install python3-nautilus gir1.2-gst-plugins-base-1.0 gir1.2-gexiv2-0.10 python3-systemd
 ```
+
+Other distros: package names vary (look for the nautilus-python, GstPbutils typelib, and GExiv2 typelib packages).
 
 Tested on:
 - GNOME / Nautilus 48 & 49
 - Ubuntu 25.04 & 25.10
+- Debian 13 (trixie)
 
 Expected to work on:
 - Targets nautilus-python API 4.0 (GNOME 45+); expected to work across distros, but dependency packaging may vary.
@@ -65,6 +77,19 @@ Restart Nautilus, switch to **List View**, open **Visible Columns**, and enable:
 - Duration
 - FPS
 
+### Development install
+
+To run from a local clone, symlink the script instead of downloading it:
+
+```bash
+mkdir -p ~/.local/share/nautilus-python/extensions
+ln -sf "$PWD/nautilus-media-columns.py" \
+  ~/.local/share/nautilus-python/extensions/nautilus-media-columns.py
+nautilus -q
+```
+
+Nautilus loads extensions at startup, so run `nautilus -q` after each edit.
+
 ---
 
 ## Cache
@@ -80,14 +105,14 @@ Safe to delete at any time; it will be recreated automatically.
 Cache behavior:
 - Entries are refreshed only if **mtime or size changes**
 - Cache is pruned automatically based on TTL and max-row limits
-- Writes are batched to minimize I/O
+- Writes are batched and committed within a couple of seconds
 
 ---
 
 ## Supported Formats
 
 **Images**
-- PNG, JPG/JPEG, WebP, BMP, TIFF
+- PNG, JPG/JPEG, WebP, BMP, TIF/TIFF
 
 **Videos**
 - MP4, MKV, MOV, AVI, WebM, M4V
@@ -98,31 +123,35 @@ Cache behavior:
 
 ## Performance Notes
 
-- First visit to a folder may probe uncached files
-- Subsequent visits are instant
-- Probing is best-effort and cached; some files may take longer on first access.
+- First visit to a folder probes uncached files in the background; columns fill in over a few seconds
+- Subsequent visits are instant (served from cache)
+- The window stays responsive while probing
 
 ---
 
 ## Troubleshooting
 
 - **Columns not showing up?**
-  - `ValueError: Namespace GstPbutils not available`
-    - Install the GStreamer GI typelib for `GstPbutils` (Ubuntu/Debian: `gir1.2-gst-plugins-base-1.0`).
   - Restart Nautilus: `nautilus -q`
   - Ensure you are in **List View** and the columns are enabled via **Visible Columns**.
+
+- **Image columns work, but Duration/FPS are always empty?**
+  - The log shows `GstPbutils unavailable; video columns disabled`.
+  - Install the GStreamer GI typelib for `GstPbutils` (Debian/Ubuntu: `gir1.2-gst-plugins-base-1.0`), then restart Nautilus.
 
 - **No duration or FPS for some videos?**
   - Codec support depends on installed GStreamer plugins.
   - You may need additional packages (e.g. `gstreamer1.0-libav`, `gstreamer1.0-plugins-ugly`).
 
-- **Images show no dimensions or limited metadata?**
-  - The extension prefers **GExiv2** for image metadata; if unavailable, it falls back to **GdkPixbuf** with reduced metadata.
-  - You may need to install the **GExiv2 GI bindings** (package name varies by distro, e.g. `gir1.2-gexiv2-*`).
+- **Images show no dimensions?**
+  - The log shows `No image backend available`.
+  - Install the GExiv2 GI bindings (Debian/Ubuntu: `gir1.2-gexiv2-0.10`); GdkPixbuf is used as a fallback when available.
 
 ---
 
 ## Debug Logging
+
+The `journalctl -t` commands require `python3-systemd`. Without it, messages still go to Nautilus's stderr.
 
 ### View normal logs
 
