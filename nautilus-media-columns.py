@@ -38,6 +38,27 @@ except (ValueError, ImportError):
     GdkPixbuf = None
 
 
+# Config
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+SUPPORTED_EXTS = IMAGE_EXTS | (VIDEO_EXTS if HAVE_GST else set())
+
+_NS_PER_SEC = 1_000_000_000
+DISCOVER_TIMEOUT_NS = 2 * _NS_PER_SEC
+
+CACHE_DIR = pathlib.Path.home() / ".cache" / "nautilus-media-columns"
+CACHE_DB = CACHE_DIR / "media.sqlite3"
+CACHE_TTL_DAYS = 90
+CACHE_MAX_ROWS = 50000
+DB_TIMEOUT_S = 2.0
+DB_BUSY_TIMEOUT_MS = 2000
+COMMIT_EVERY = 50
+COMMIT_DELAY_S = 2
+
+# In-process cache to avoid repeated SQLite hits while Nautilus is running
+_MEM_CACHE_MAX = 2048
+
+
 # Logging
 _LOG_DOMAIN = "nautilus-media-columns"
 
@@ -91,41 +112,20 @@ def log_error(msg):
     _journal(logging.ERROR, msg)
 
 
-# Initialize GStreamer
+# Backends
 if HAVE_GST:
     Gst.init(None)
 else:
     log_warn("GstPbutils unavailable; video columns disabled")
 
-# Config
-VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-SUPPORTED_EXTS = IMAGE_EXTS | (VIDEO_EXTS if HAVE_GST else set())
-
-_NS_PER_SEC = 1_000_000_000
-DISCOVER_TIMEOUT_NS = 2 * _NS_PER_SEC
-
-DB_TIMEOUT_S = 2.0
-DB_BUSY_TIMEOUT_MS = 2000
-CACHE_TTL_DAYS = 90
-CACHE_MAX_ROWS = 50000
-CACHE_DIR = pathlib.Path.home() / ".cache" / "nautilus-media-columns"
-CACHE_DB = CACHE_DIR / "media.sqlite3"
-
-# In-process cache to avoid repeated SQLite hits while Nautilus is running
-_MEM_CACHE_MAX = 2048
-
-COMMIT_EVERY = 50
-COMMIT_DELAY_S = 2
-
 IMAGE_BACKEND = "GExiv2" if GExiv2 else "GdkPixbuf" if GdkPixbuf else None
-
 if IMAGE_BACKEND:
     log_info(f"Image backend selected: {IMAGE_BACKEND}")
 else:
     log_warn("No image backend available; image dimensions will be empty")
 
 
+# Cache
 class MediaInfo(NamedTuple):
     """Probed media metadata; empty strings mean unknown."""
 
@@ -299,7 +299,7 @@ _CACHE = _Cache()
 atexit.register(_CACHE.close)
 
 
-# Formatting
+# Probing
 def _fmt_duration_ns(duration_ns: int) -> str:
     """Turn a nanosecond duration into a readable time string."""
     if duration_ns <= 0:
@@ -318,7 +318,6 @@ def _fmt_framerate_ratio(numerator: int, denominator: int) -> str:
     return str(round(numerator / denominator))
 
 
-# Probers
 def _probe_image(path: str) -> str:
     """Read image dimensions without fully decoding the file."""
     log_debug(f"Probe image: {path}")
@@ -405,6 +404,14 @@ def _probe_video(path: str) -> MediaInfo:
     return MediaInfo(dimensions=dimensions, duration=duration, framerate=framerate)
 
 
+def _probe(path: pathlib.Path) -> MediaInfo:
+    """Probe a file for media metadata based on its extension."""
+    if path.suffix.lower() in VIDEO_EXTS:
+        return _probe_video(str(path))
+    return MediaInfo(dimensions=_probe_image(str(path)))
+
+
+# Nautilus
 def _local_path(file: Nautilus.FileInfo) -> pathlib.Path | None:
     """Return the file's local path if it is a supported regular media file."""
     if file.get_uri_scheme() != "file":
@@ -422,13 +429,6 @@ def _local_path(file: Nautilus.FileInfo) -> pathlib.Path | None:
             log_debug(f"Skip: unsupported ext '{ext}' ({path})")
         return None
     return path
-
-
-def _probe(path: pathlib.Path) -> MediaInfo:
-    """Probe a file for media metadata based on its extension."""
-    if path.suffix.lower() in VIDEO_EXTS:
-        return _probe_video(str(path))
-    return MediaInfo(dimensions=_probe_image(str(path)))
 
 
 def _apply(file: Nautilus.FileInfo, info: MediaInfo) -> None:
