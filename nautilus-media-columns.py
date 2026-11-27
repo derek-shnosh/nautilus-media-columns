@@ -43,8 +43,8 @@ VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 SUPPORTED_EXTS = IMAGE_EXTS | (VIDEO_EXTS if HAVE_GST else set())
 
-_NS_PER_SEC = 1_000_000_000
-DISCOVER_TIMEOUT_NS = 2 * _NS_PER_SEC
+NS_PER_SEC = 1_000_000_000
+DISCOVER_TIMEOUT_NS = 2 * NS_PER_SEC
 
 CACHE_DIR = pathlib.Path.home() / ".cache" / "nautilus-media-columns"
 CACHE_DB = CACHE_DIR / "media.sqlite3"
@@ -56,7 +56,7 @@ COMMIT_EVERY = 50
 COMMIT_DELAY_S = 2
 
 # In-process cache to avoid repeated SQLite hits while Nautilus is running
-_MEM_CACHE_MAX = 2048
+MEM_CACHE_MAX = 2048
 
 
 # Logging
@@ -240,7 +240,7 @@ class _Cache:
 
     def _prune(self) -> None:
         """Remove entries past the TTL, then trim to CACHE_MAX_ROWS by least-recent access."""
-        cutoff = time.time_ns() - (CACHE_TTL_DAYS * 24 * 60 * 60 * _NS_PER_SEC)
+        cutoff = time.time_ns() - (CACHE_TTL_DAYS * 24 * 60 * 60 * NS_PER_SEC)
         deleted = 0
         try:
             cur = self._conn.execute(
@@ -267,7 +267,7 @@ class _Cache:
     def _remember(self, path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
         """Keep an entry in memory, evicting the oldest past _MEM_CACHE_MAX."""
         self._mem[path] = (mtime_ns, size, info)
-        if len(self._mem) > _MEM_CACHE_MAX:
+        if len(self._mem) > MEM_CACHE_MAX:
             evicted = next(iter(self._mem))
             del self._mem[evicted]
             log_debug(f"Mem-cache evicted: {evicted}")
@@ -304,7 +304,7 @@ def _fmt_duration_ns(duration_ns: int) -> str:
     """Turn a nanosecond duration into a readable time string."""
     if duration_ns <= 0:
         return ""
-    total_seconds = duration_ns // _NS_PER_SEC
+    total_seconds = duration_ns // NS_PER_SEC
     h = total_seconds // 3600
     m = (total_seconds % 3600) // 60
     s = total_seconds % 60
