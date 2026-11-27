@@ -321,7 +321,7 @@ def _fmt_framerate_ratio(numerator: int, denominator: int) -> str:
 # Probers
 def _probe_image(path: str) -> str:
     """Read image dimensions without fully decoding the file."""
-    log_debug(f"Probe image: {path} (backend={IMAGE_BACKEND or 'none'})")
+    log_debug(f"Probe image: {path}")
     if IMAGE_BACKEND == "GExiv2":
         try:
             metadata = GExiv2.Metadata.new()
