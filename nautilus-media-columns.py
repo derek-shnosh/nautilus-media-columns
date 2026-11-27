@@ -40,30 +40,24 @@ except (ValueError, ImportError):
 
 # Logging
 _LOG_DOMAIN = "nautilus-media-columns"
-JOURNAL_AVAILABLE = False
 
 _debug_env = (GLib.getenv("G_MESSAGES_DEBUG") or "").strip()
 _DEBUG_ENABLED = _debug_env == "all" or _LOG_DOMAIN in _debug_env.split(",")
 
 try:
     from systemd.journal import JournalHandler
-
+except ImportError:
+    _journal_logger = None
+else:
     _journal_logger = logging.getLogger(_LOG_DOMAIN)
     _journal_logger.setLevel(logging.DEBUG)
-
-    journal_handler = JournalHandler(SYSLOG_IDENTIFIER=_LOG_DOMAIN)
-    journal_handler.setLevel(logging.DEBUG)
-    journal_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-
-    _journal_logger.addHandler(journal_handler)
-
-    JOURNAL_AVAILABLE = True
-except ImportError:
-    pass
+    _handler = JournalHandler(SYSLOG_IDENTIFIER=_LOG_DOMAIN)
+    _handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    _journal_logger.addHandler(_handler)
 
 
 def _journal(level, msg):
-    if JOURNAL_AVAILABLE and (level != logging.DEBUG or _DEBUG_ENABLED):
+    if _journal_logger:
         _journal_logger.log(level, msg)
 
 
