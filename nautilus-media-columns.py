@@ -27,7 +27,7 @@ except (ValueError, ImportError):
 try:
     gi.require_version("GdkPixbuf", "2.0")
     from gi.repository import GdkPixbuf
-except ImportError:
+except (ValueError, ImportError):
     GdkPixbuf = None
 
 
