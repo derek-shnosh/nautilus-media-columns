@@ -341,10 +341,6 @@ def _cache_prune(conn: sqlite3.Connection) -> None:
 # Formatting
 def _fmt_duration_ns(duration_ns: int) -> str:
     """Turn a nanosecond duration into a readable time string."""
-    try:
-        duration_ns = int(duration_ns)
-    except Exception:
-        return ""
     if duration_ns <= 0:
         return ""
     total_seconds = duration_ns // _NS_PER_SEC
@@ -356,15 +352,9 @@ def _fmt_duration_ns(duration_ns: int) -> str:
 
 def _fmt_framerate_ratio(numerator: int, denominator: int) -> str:
     """Turn a framerate ratio into a whole-number FPS string."""
-    try:
-        numerator = int(numerator)
-        denominator = int(denominator)
-    except Exception:
-        return ""
     if denominator == 0 or numerator == 0:
         return ""
-    framerate = numerator / denominator
-    return str(round(framerate))
+    return str(round(numerator / denominator))
 
 
 # Probers
@@ -410,7 +400,7 @@ def _get_discoverer():
         try:
             _DISCOVERER = GstPbutils.Discoverer.new(DISCOVER_TIMEOUT_NS)
             log_info("Created GStreamer discoverer")
-        except Exception as e:
+        except GLib.Error as e:
             log_warn(f"Failed to create GStreamer discoverer: {type(e).__name__}: {e}")
             _DISCOVERER = None
     return _DISCOVERER
@@ -427,8 +417,7 @@ def _probe_video(path: str) -> MediaInfo:
     start_ns = time.time_ns()
     try:
         info = discoverer.discover_uri(uri)
-    except Exception as e:
-        # GStreamer GI bindings can raise inconsistent exceptions.
+    except GLib.Error as e:
         # Metadata is optional; never fail the file manager.
         log_warn(f"GStreamer discover failed (non-fatal): {type(e).__name__}: {e}")
         return MediaInfo()
@@ -442,34 +431,15 @@ def _probe_video(path: str) -> MediaInfo:
     dimensions = ""
     framerate = ""
 
-    try:
-        streams = info.get_video_streams()
-    except Exception as e:
-        # GI/C boundary: GStreamer introspection can vary by version/plugins.
-        # Treat missing stream info as "no video streams" and keep Nautilus stable.
-        log_debug(f"get_video_streams failed (non-fatal): {type(e).__name__}: {e}")
-        streams = []
-
-    for stream in streams:
-        try:
-            width = stream.get_width()
-            height = stream.get_height()
-            if width > 0 and height > 0:
-                dimensions = f"{width}x{height}"
-        except Exception as e:
-            # GI/C boundary: stream fields can be unavailable for some demuxers/codecs.
-            log_debug(f"Stream dimension read failed (non-fatal): {type(e).__name__}: {e}")
-
-        try:
-            framerate_num = stream.get_framerate_num()
-            framerate_denom = stream.get_framerate_denom()
-            if framerate_num and framerate_denom:
-                framerate = _fmt_framerate_ratio(framerate_num, framerate_denom)
-        except Exception as e:
-            # GI/C boundary: framerate access may raise across plugin/ABI differences.
-            log_debug(f"Stream framerate read failed (non-fatal): {type(e).__name__}: {e}")
-
-        break
+    streams = info.get_video_streams()
+    if streams:
+        stream = streams[0]
+        width, height = stream.get_width(), stream.get_height()
+        if width > 0 and height > 0:
+            dimensions = f"{width}x{height}"
+        num, denom = stream.get_framerate_num(), stream.get_framerate_denom()
+        if num and denom:
+            framerate = _fmt_framerate_ratio(num, denom)
 
     log_debug(f"Video probed -> dur='{duration}' dims='{dimensions}' fps='{framerate}'")
     return MediaInfo(dimensions=dimensions, duration=duration, framerate=framerate)
@@ -508,6 +478,24 @@ def _apply(file: Nautilus.FileInfo, info: MediaInfo) -> None:
     file.add_string_attribute("media_framerate", info.framerate)
 
 
+def _fill_columns(file: Nautilus.FileInfo) -> None:
+    """Resolve, probe (or read from cache), and apply media columns for one file."""
+    path = _local_path(file)
+    if path is None:
+        return
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return
+    key = str(path)
+    mtime_ns, size = stat_result.st_mtime_ns, stat_result.st_size
+    info = _cache_get(key, mtime_ns, size)
+    if info is None:
+        info = _probe(path)
+        _cache_put(key, mtime_ns, size, info)
+    _apply(file, info)
+
+
 class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvider):
     """Extension: Adds media metadata columns to Nautilus."""
 
@@ -541,18 +529,8 @@ class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvid
 
     # Called once per file by Nautilus
     def update_file_info(self, file: Nautilus.FileInfo, *_unused) -> None:
-        """Fill in media columns for one file."""
-        path = _local_path(file)
-        if path is None:
-            return
+        """Fill in media columns for one file; never let an error escape into Nautilus."""
         try:
-            stat_result = path.stat()
-        except OSError:
-            return
-        key = str(path)
-        mtime_ns, size = stat_result.st_mtime_ns, stat_result.st_size
-        info = _cache_get(key, mtime_ns, size)
-        if info is None:
-            info = _probe(path)
-            _cache_put(key, mtime_ns, size, info)
-        _apply(file, info)
+            _fill_columns(file)
+        except Exception as e:  # noqa: BLE001 - extension boundary
+            log_error(f"update_file_info failed: {type(e).__name__}: {e}")
