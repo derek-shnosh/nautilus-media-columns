@@ -1,17 +1,17 @@
-#!/usr/bin/env python3
+"""Nautilus extension adding Dimensions, Duration, and FPS columns for media files."""
 
 import atexit
 import os
 import pathlib
 import sqlite3
 import time
-from typing import NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 import gi
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
-from gi.repository import GObject, Nautilus, Gst, GstPbutils, GLib
+from gi.repository import GLib, GObject, Gst, GstPbutils, Nautilus
 
 # Image backends:
 # - Prefer GExiv2: metadata-only, orientation-aware, matches Nautilus internals
@@ -49,9 +49,7 @@ try:
 
     journal_handler = JournalHandler(SYSLOG_IDENTIFIER=_LOG_DOMAIN)
     journal_handler.setLevel(logging.DEBUG)
-    journal_handler.setFormatter(
-        logging.Formatter("[%(levelname)s] %(message)s")
-    )
+    journal_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
 
     _journal_logger.addHandler(journal_handler)
 
@@ -70,6 +68,7 @@ def _glib_log(level_flag, msg):
 
 
 def log_debug(msg):
+    """Log a debug message (only when G_MESSAGES_DEBUG enables this domain)."""
     if not _DEBUG_ENABLED:
         return
     _glib_log(GLib.LogLevelFlags.LEVEL_DEBUG, msg)
@@ -77,16 +76,19 @@ def log_debug(msg):
 
 
 def log_info(msg):
+    """Log an informational message."""
     _glib_log(GLib.LogLevelFlags.LEVEL_MESSAGE, msg)
     _journal(logging.INFO, msg)
 
 
 def log_warn(msg):
+    """Log a warning message."""
     _glib_log(GLib.LogLevelFlags.LEVEL_WARNING, msg)
     _journal(logging.WARNING, msg)
 
 
 def log_error(msg):
+    """Log an error message."""
     _glib_log(GLib.LogLevelFlags.LEVEL_CRITICAL, msg)
     _journal(logging.ERROR, msg)
 
@@ -96,7 +98,7 @@ Gst.init(None)
 
 # Config
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 SUPPORTED_EXTS = VIDEO_EXTS | IMAGE_EXTS
 
 DISCOVER_TIMEOUT_NS = 2 * Gst.SECOND
@@ -217,7 +219,7 @@ def _mem_cache_put(
         log_debug(f"Mem-cache evicted: {evicted}")
 
 
-def _cache_get(path: str, mtime_ns: int, size: int) -> Optional[Tuple[str, str, str]]:
+def _cache_get(path: str, mtime_ns: int, size: int) -> tuple[str, str, str] | None:
     """Get cached values for a file if they are still valid."""
     global _pending_writes
     cached = _MEM_CACHE.get(path)
@@ -347,7 +349,7 @@ def _fmt_framerate_ratio(numerator: int, denominator: int) -> str:
     if denominator == 0 or numerator == 0:
         return ""
     framerate = numerator / denominator
-    return str(int(round(framerate)))
+    return str(round(framerate))
 
 
 # Probers
@@ -470,10 +472,12 @@ class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvid
     """Extension: Adds media metadata columns to Nautilus."""
 
     def __init__(self):
+        """Initialize the extension."""
         super().__init__()
         log_info("nautilus-media-columns extension initialized")
 
     def get_columns(self):
+        """Return the column definitions shown in Nautilus list view."""
         return [
             Nautilus.Column(
                 name="NautilusPython::media_dimensions",
@@ -498,7 +502,6 @@ class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvid
     # Called once per file by Nautilus
     def update_file_info(self, file: Nautilus.FileInfo, *_unused) -> None:
         """Fill in media columns for one file."""
-
         # Only handle local filesystem URIs (skip smb://, trash://, etc.)
         if file.get_uri_scheme() != "file":
             return
