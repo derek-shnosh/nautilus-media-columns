@@ -242,11 +242,7 @@ def _cache_get(path: str, mtime_ns: int, size: int) -> tuple[str, str, str] | No
         return None
 
     if int(row[0]) != mtime_ns or int(row[1]) != size:
-        log_debug(f"Cache stale -> delete: {path}")
-        try:
-            conn.execute("DELETE FROM cache WHERE path=?", (path,))
-        except sqlite3.Error as e:
-            log_debug(f"Cache stale delete failed (non-fatal): {type(e).__name__}: {e}")
+        log_debug(f"Cache stale: {path}")
         return None
 
     dimensions, duration, framerate = row[2] or "", row[3] or "", row[4] or ""
