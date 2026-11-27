@@ -1,16 +1,25 @@
 """Nautilus extension adding Dimensions, Duration, and FPS columns for media files."""
 
 import atexit
+import logging
 import pathlib
 import sqlite3
 import time
 from typing import NamedTuple
 
 import gi
+from gi.repository import GLib, GObject, Nautilus
 
-gi.require_version("Gst", "1.0")
-gi.require_version("GstPbutils", "1.0")
-from gi.repository import GLib, GObject, Gst, GstPbutils, Nautilus
+# Video backend: optional; without it, only image columns are populated
+HAVE_GST = False
+try:
+    gi.require_version("Gst", "1.0")
+    gi.require_version("GstPbutils", "1.0")
+    from gi.repository import Gst, GstPbutils
+
+    HAVE_GST = True
+except (ValueError, ImportError):
+    Gst = GstPbutils = None
 
 # Image backends:
 # - Prefer GExiv2: metadata-only, orientation-aware, matches Nautilus internals
@@ -32,8 +41,6 @@ except (ValueError, ImportError):
 
 
 # Logging
-import logging
-
 _LOG_DOMAIN = "nautilus-media-columns"
 JOURNAL_AVAILABLE = False
 
@@ -93,14 +100,18 @@ def log_error(msg):
 
 
 # Initialize GStreamer
-Gst.init(None)
+if HAVE_GST:
+    Gst.init(None)
+else:
+    log_warn("GstPbutils unavailable; video columns disabled")
 
 # Config
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-SUPPORTED_EXTS = VIDEO_EXTS | IMAGE_EXTS
+SUPPORTED_EXTS = IMAGE_EXTS | (VIDEO_EXTS if HAVE_GST else set())
 
-DISCOVER_TIMEOUT_NS = 2 * Gst.SECOND
+_NS_PER_SEC = 1_000_000_000
+DISCOVER_TIMEOUT_NS = 2 * _NS_PER_SEC
 
 DB_TIMEOUT_S = 2.0
 DB_BUSY_TIMEOUT_MS = 2000
@@ -303,7 +314,7 @@ def _cache_put(path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
 def _cache_prune(conn: sqlite3.Connection) -> None:
     """Remove stale or excess cache entries based on age and total size limits."""
     now = time.time_ns()
-    cutoff = now - (CACHE_TTL_DAYS * 24 * 60 * 60 * 1_000_000_000)
+    cutoff = now - (CACHE_TTL_DAYS * 24 * 60 * 60 * _NS_PER_SEC)
     deleted = 0
     try:
         delete_cursor = conn.execute(
@@ -336,7 +347,7 @@ def _fmt_duration_ns(duration_ns: int) -> str:
         return ""
     if duration_ns <= 0:
         return ""
-    total_seconds = duration_ns // int(Gst.SECOND)
+    total_seconds = duration_ns // _NS_PER_SEC
     h = total_seconds // 3600
     m = (total_seconds % 3600) // 60
     s = total_seconds % 60
