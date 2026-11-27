@@ -25,12 +25,9 @@ except (ValueError, ImportError):
 # Image backends:
 # - Prefer GExiv2: metadata-only, orientation-aware, matches Nautilus internals
 # - Fallback to GdkPixbuf header probe to avoid hard dependencies or extension failure
-HAVE_GEXIV2 = False
 try:
     gi.require_version("GExiv2", "0.10")
     from gi.repository import GExiv2
-
-    HAVE_GEXIV2 = True
 except (ValueError, ImportError):
     GExiv2 = None
 
@@ -127,14 +124,7 @@ _MEM_CACHE_MAX = 2048
 COMMIT_EVERY = 50
 COMMIT_DELAY_S = 2
 
-# Globals
-IMAGE_BACKEND = None
-
-
-if HAVE_GEXIV2 and GExiv2 is not None:
-    IMAGE_BACKEND = "GExiv2"
-elif GdkPixbuf is not None:
-    IMAGE_BACKEND = "GdkPixbuf"
+IMAGE_BACKEND = "GExiv2" if GExiv2 else "GdkPixbuf" if GdkPixbuf else None
 
 if IMAGE_BACKEND:
     log_info(f"Image backend selected: {IMAGE_BACKEND}")
