@@ -126,13 +126,9 @@ _MEM_CACHE_MAX = 2048
 
 COMMIT_EVERY = 50
 COMMIT_DELAY_S = 2
-_commit_source_id = 0
 
 # Globals
 IMAGE_BACKEND = None
-_MEM_CACHE = {}
-_DB = None
-_pending_writes = 0
 
 
 if HAVE_GEXIV2 and GExiv2 is not None:
@@ -146,97 +142,6 @@ else:
     log_warn("No image backend available; image dimensions will be empty")
 
 
-# Database
-def _get_db() -> sqlite3.Connection:
-    """Open the cache database if needed and return the connection."""
-    global _DB
-    if _DB is not None:
-        return _DB
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    log_info(f"Opening cache DB: {CACHE_DB}")
-    conn = sqlite3.connect(CACHE_DB, timeout=DB_TIMEOUT_S)
-    try:
-        conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.Error as e:
-        log_debug(f"SQLite PRAGMA failed (non-fatal): {type(e).__name__}: {e}")
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cache(
-          path TEXT PRIMARY KEY,
-          mtime_ns INTEGER NOT NULL,
-          size INTEGER NOT NULL,
-          dims TEXT,
-          dur TEXT,
-          fps TEXT,
-          last_access_ns INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(cache)").fetchall()}
-        if "last_access_ns" not in cols:
-            log_info("Upgrading cache schema: adding last_access_ns")
-            conn.execute("ALTER TABLE cache ADD COLUMN last_access_ns INTEGER NOT NULL DEFAULT 0")
-            conn.commit()
-    except sqlite3.Error as e:
-        log_debug(f"SQLite schema check/upgrade failed (non-fatal): {type(e).__name__}: {e}")
-
-    _DB = conn
-    _cache_prune(conn)
-    return _DB
-
-
-def _commit_pending() -> bool:
-    """Commit pending cache writes; runs from the GLib main loop."""
-    global _pending_writes, _commit_source_id
-    _commit_source_id = 0
-    if _DB is not None and _pending_writes:
-        try:
-            _DB.commit()
-            log_debug(f"Commit: {_pending_writes} pending writes")
-            _pending_writes = 0
-        except sqlite3.Error as e:
-            log_warn(f"SQLite commit failed (non-fatal): {type(e).__name__}: {e}")
-    return GLib.SOURCE_REMOVE
-
-
-def _note_write() -> None:
-    """Count a pending write; commit at the threshold, else schedule a delayed commit."""
-    global _pending_writes, _commit_source_id
-    _pending_writes += 1
-    if _pending_writes >= COMMIT_EVERY:
-        _commit_pending()
-    elif not _commit_source_id:
-        _commit_source_id = GLib.timeout_add_seconds(COMMIT_DELAY_S, _commit_pending)
-
-
-def _flush_and_close_db() -> None:
-    """Write any pending cache data and close the database."""
-    global _DB, _pending_writes
-    if _DB is None:
-        return
-    try:
-        if _pending_writes:
-            log_debug(f"Flushing pending DB writes: {_pending_writes}")
-            _DB.commit()
-            _pending_writes = 0
-    except sqlite3.Error as e:
-        log_warn(f"SQLite commit failed (non-fatal): {type(e).__name__}: {e}")
-    try:
-        _DB.close()
-        log_debug("Closed cache DB")
-    except sqlite3.Error as e:
-        log_warn(f"SQLite close failed (non-fatal): {type(e).__name__}: {e}")
-    _DB = None
-
-
-atexit.register(_flush_and_close_db)
-
-
 class MediaInfo(NamedTuple):
     """Probed media metadata; empty strings mean unknown."""
 
@@ -245,97 +150,177 @@ class MediaInfo(NamedTuple):
     framerate: str = ""
 
 
-# Cache
-def _mem_cache_put(path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
-    """Save a cache entry in memory for fast reuse."""
-    _MEM_CACHE[path] = (mtime_ns, size, info)
-    if len(_MEM_CACHE) > _MEM_CACHE_MAX:
-        # FIFO eviction (dict keeps insertion order in Python 3.7+)
-        evicted = next(iter(_MEM_CACHE))
-        _MEM_CACHE.pop(evicted, None)
-        log_debug(f"Mem-cache evicted: {evicted}")
+class _Cache:
+    """SQLite-backed metadata cache with an in-memory front and batched commits."""
 
+    def __init__(self) -> None:
+        self._conn: sqlite3.Connection | None = None
+        self._mem: dict[str, tuple[int, int, MediaInfo]] = {}
+        self._pending = 0
+        self._commit_source_id = 0
 
-def _cache_get(path: str, mtime_ns: int, size: int) -> MediaInfo | None:
-    """Get cached values for a file if they are still valid."""
-    cached = _MEM_CACHE.get(path)
-    if cached and cached[0] == mtime_ns and cached[1] == size:
-        log_debug(f"Cache hit (mem): {path}")
-        return cached[2]
+    def get(self, path: str, mtime_ns: int, size: int) -> MediaInfo | None:
+        """Return cached metadata for a file if its mtime and size still match."""
+        cached = self._mem.get(path)
+        if cached and cached[0] == mtime_ns and cached[1] == size:
+            log_debug(f"Cache hit (mem): {path}")
+            return cached[2]
 
-    try:
-        conn = _get_db()
-        row = conn.execute(
-            "SELECT mtime_ns,size,dims,dur,fps FROM cache WHERE path=?",
-            (path,),
-        ).fetchone()
-    except sqlite3.Error as e:
-        log_debug(f"Cache query failed (non-fatal): {type(e).__name__}: {e}")
-        return None
+        try:
+            conn = self._db()
+            row = conn.execute(
+                "SELECT mtime_ns,size,dims,dur,fps FROM cache WHERE path=?",
+                (path,),
+            ).fetchone()
+        except sqlite3.Error as e:
+            log_debug(f"Cache query failed (non-fatal): {type(e).__name__}: {e}")
+            return None
 
-    if not row:
-        log_debug(f"Cache miss (db): {path}")
-        return None
+        if not row:
+            log_debug(f"Cache miss (db): {path}")
+            return None
+        if int(row[0]) != mtime_ns or int(row[1]) != size:
+            log_debug(f"Cache stale: {path}")
+            return None
 
-    if int(row[0]) != mtime_ns or int(row[1]) != size:
-        log_debug(f"Cache stale: {path}")
-        return None
+        info = MediaInfo(row[2] or "", row[3] or "", row[4] or "")
+        try:
+            conn.execute(
+                "UPDATE cache SET last_access_ns=? WHERE path=?",
+                (time.time_ns(), path),
+            )
+            self._note_write()
+        except sqlite3.Error as e:
+            log_debug(f"Cache last_access update failed (non-fatal): {type(e).__name__}: {e}")
 
-    info = MediaInfo(row[2] or "", row[3] or "", row[4] or "")
-    try:
+        self._remember(path, mtime_ns, size, info)
+        log_debug(f"Cache hit (db): {path}")
+        return info
+
+    def put(self, path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
+        """Store metadata for a file."""
+        self._remember(path, mtime_ns, size, info)
+        try:
+            self._db().execute(
+                "INSERT OR REPLACE INTO cache(path,mtime_ns,size,dims,dur,fps,last_access_ns) VALUES(?,?,?,?,?,?,?)",
+                (path, mtime_ns, size, *info, time.time_ns()),
+            )
+            self._note_write()
+        except sqlite3.Error as e:
+            log_debug(f"Cache put failed (non-fatal): {type(e).__name__}: {e}")
+
+    def close(self) -> None:
+        """Commit pending writes and close the database (best effort)."""
+        if self._conn is None:
+            return
+        self._commit()
+        try:
+            self._conn.close()
+            log_debug("Closed cache DB")
+        except sqlite3.Error as e:
+            log_warn(f"SQLite close failed (non-fatal): {type(e).__name__}: {e}")
+        self._conn = None
+
+    def _db(self) -> sqlite3.Connection:
+        """Open the database on first use and return the connection."""
+        if self._conn is not None:
+            return self._conn
+
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        log_info(f"Opening cache DB: {CACHE_DB}")
+        conn = sqlite3.connect(CACHE_DB, timeout=DB_TIMEOUT_S)
+        try:
+            conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error as e:
+            log_debug(f"SQLite PRAGMA failed (non-fatal): {type(e).__name__}: {e}")
+
         conn.execute(
-            "UPDATE cache SET last_access_ns=? WHERE path=?",
-            (time.time_ns(), path),
+            """
+            CREATE TABLE IF NOT EXISTS cache(
+              path TEXT PRIMARY KEY,
+              mtime_ns INTEGER NOT NULL,
+              size INTEGER NOT NULL,
+              dims TEXT,
+              dur TEXT,
+              fps TEXT,
+              last_access_ns INTEGER NOT NULL DEFAULT 0
+            )
+            """
         )
-        _note_write()
-    except sqlite3.Error as e:
-        log_debug(f"Cache last_access update failed (non-fatal): {type(e).__name__}: {e}")
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(cache)").fetchall()}
+            if "last_access_ns" not in cols:
+                log_info("Upgrading cache schema: adding last_access_ns")
+                conn.execute("ALTER TABLE cache ADD COLUMN last_access_ns INTEGER NOT NULL DEFAULT 0")
+                conn.commit()
+        except sqlite3.Error as e:
+            log_debug(f"SQLite schema check/upgrade failed (non-fatal): {type(e).__name__}: {e}")
 
-    _mem_cache_put(path, mtime_ns, size, info)
-    log_debug(f"Cache hit (db): {path}")
-    return info
+        self._conn = conn
+        self._prune()
+        return conn
 
-
-def _cache_put(path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
-    """Save media metadata to the cache."""
-    _mem_cache_put(path, mtime_ns, size, info)
-
-    try:
-        conn = _get_db()
-        conn.execute(
-            "INSERT OR REPLACE INTO cache(path,mtime_ns,size,dims,dur,fps,last_access_ns) VALUES(?,?,?,?,?,?,?)",
-            (path, mtime_ns, size, *info, time.time_ns()),
-        )
-        _note_write()
-    except sqlite3.Error as e:
-        log_debug(f"Cache put failed (non-fatal): {type(e).__name__}: {e}")
-
-
-def _cache_prune(conn: sqlite3.Connection) -> None:
-    """Remove stale or excess cache entries based on age and total size limits."""
-    now = time.time_ns()
-    cutoff = now - (CACHE_TTL_DAYS * 24 * 60 * 60 * _NS_PER_SEC)
-    deleted = 0
-    try:
-        delete_cursor = conn.execute(
-            "DELETE FROM cache WHERE last_access_ns > 0 AND last_access_ns < ?",
-            (cutoff,),
-        )
-        deleted += max(0, delete_cursor.rowcount or 0)
-        delete_cursor = conn.execute(
-            "DELETE FROM cache WHERE rowid IN ("
-            "SELECT rowid FROM cache ORDER BY last_access_ns ASC LIMIT ("
-            "SELECT MAX(0, COUNT(*)-?) FROM cache))",
-            (CACHE_MAX_ROWS,),
-        )
-        deleted += max(0, delete_cursor.rowcount or 0)
+    def _prune(self) -> None:
+        """Remove entries past the TTL, then trim to CACHE_MAX_ROWS by least-recent access."""
+        cutoff = time.time_ns() - (CACHE_TTL_DAYS * 24 * 60 * 60 * _NS_PER_SEC)
+        deleted = 0
+        try:
+            cur = self._conn.execute(
+                "DELETE FROM cache WHERE last_access_ns > 0 AND last_access_ns < ?",
+                (cutoff,),
+            )
+            deleted += max(0, cur.rowcount or 0)
+            cur = self._conn.execute(
+                "DELETE FROM cache WHERE rowid IN ("
+                "SELECT rowid FROM cache ORDER BY last_access_ns ASC LIMIT ("
+                "SELECT MAX(0, COUNT(*)-?) FROM cache))",
+                (CACHE_MAX_ROWS,),
+            )
+            deleted += max(0, cur.rowcount or 0)
+        except sqlite3.Error as e:
+            log_debug(f"Cache prune failed (non-fatal): {type(e).__name__}: {e}")
+            return
         if deleted:
             log_info(f"Cache pruned: {deleted} rows removed")
-            _note_write()
+            self._note_write()
         else:
             log_debug("Cache prune: no rows removed")
-    except sqlite3.Error as e:
-        log_debug(f"Cache prune failed (non-fatal): {type(e).__name__}: {e}")
+
+    def _remember(self, path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
+        """Keep an entry in memory, evicting the oldest past _MEM_CACHE_MAX."""
+        self._mem[path] = (mtime_ns, size, info)
+        if len(self._mem) > _MEM_CACHE_MAX:
+            evicted = next(iter(self._mem))
+            del self._mem[evicted]
+            log_debug(f"Mem-cache evicted: {evicted}")
+
+    def _note_write(self) -> None:
+        """Count a pending write; commit at the threshold, else schedule a delayed commit."""
+        self._pending += 1
+        if self._pending >= COMMIT_EVERY:
+            if self._commit_source_id:
+                GLib.source_remove(self._commit_source_id)
+            self._commit()
+        elif not self._commit_source_id:
+            self._commit_source_id = GLib.timeout_add_seconds(COMMIT_DELAY_S, self._commit)
+
+    def _commit(self) -> bool:
+        """Commit pending writes; also used as the GLib timeout callback."""
+        self._commit_source_id = 0
+        if self._conn is not None and self._pending:
+            try:
+                self._conn.commit()
+                log_debug(f"Commit: {self._pending} pending writes")
+                self._pending = 0
+            except sqlite3.Error as e:
+                log_warn(f"SQLite commit failed (non-fatal): {type(e).__name__}: {e}")
+        return GLib.SOURCE_REMOVE
+
+
+_CACHE = _Cache()
+atexit.register(_CACHE.close)
 
 
 # Formatting
@@ -488,10 +473,10 @@ def _fill_columns(file: Nautilus.FileInfo) -> None:
         return
     key = str(path)
     mtime_ns, size = stat_result.st_mtime_ns, stat_result.st_size
-    info = _cache_get(key, mtime_ns, size)
+    info = _CACHE.get(key, mtime_ns, size)
     if info is None:
         info = _probe(path)
-        _cache_put(key, mtime_ns, size, info)
+        _CACHE.put(key, mtime_ns, size, info)
     _apply(file, info)
 
 
