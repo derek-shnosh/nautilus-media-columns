@@ -318,39 +318,47 @@ def _fmt_framerate_ratio(numerator: int, denominator: int) -> str:
     return str(round(numerator / denominator))
 
 
+def _probe_gexiv2(path: str) -> str:
+    """Read dimensions via GExiv2, applying EXIF orientation; empty on failure."""
+    try:
+        metadata = GExiv2.Metadata.new()
+        metadata.open_path(path)
+    except GLib.Error as e:
+        log_debug(f"GExiv2 probe failed (non-fatal): {type(e).__name__}: {e}")
+        return ""
+    width, height = metadata.get_pixel_width(), metadata.get_pixel_height()
+    if width <= 0 or height <= 0:
+        return ""
+    if metadata.get_orientation() in (
+        GExiv2.Orientation.ROT_90,
+        GExiv2.Orientation.ROT_270,
+        GExiv2.Orientation.ROT_90_HFLIP,
+        GExiv2.Orientation.ROT_90_VFLIP,
+    ):
+        width, height = height, width
+        log_debug("Image orientation swap applied")
+    return f"{width}x{height}"
+
+
+def _probe_gdkpixbuf(path: str) -> str:
+    """Read dimensions from the image header via GdkPixbuf; empty on failure."""
+    try:
+        _, width, height = GdkPixbuf.Pixbuf.get_file_info(path)
+    except GLib.Error as e:
+        log_debug(f"GdkPixbuf probe failed (non-fatal): {type(e).__name__}: {e}")
+        return ""
+    return f"{width}x{height}" if width > 0 and height > 0 else ""
+
+
 def _probe_image(path: str) -> str:
-    """Read image dimensions without fully decoding the file."""
+    """Read image dimensions without fully decoding: GExiv2 first, GdkPixbuf as fallback."""
     log_debug(f"Probe image: {path}")
-    if IMAGE_BACKEND == "GExiv2":
-        try:
-            metadata = GExiv2.Metadata.new()
-            metadata.open_path(path)
-        except GLib.Error as e:
-            log_debug(f"GExiv2 probe failed (non-fatal): {type(e).__name__}: {e}")
-            return ""
-        width = metadata.get_pixel_width()
-        height = metadata.get_pixel_height()
-        if width <= 0 or height <= 0:
-            return ""
-        if metadata.get_orientation() in (
-            GExiv2.Orientation.ROT_90,
-            GExiv2.Orientation.ROT_270,
-            GExiv2.Orientation.ROT_90_HFLIP,
-            GExiv2.Orientation.ROT_90_VFLIP,
-        ):
-            width, height = height, width
-            log_debug("Image orientation swap applied")
-        return f"{width}x{height}"
-
-    if IMAGE_BACKEND == "GdkPixbuf":
-        try:
-            _, width, height = GdkPixbuf.Pixbuf.get_file_info(path)
-        except GLib.Error as e:
-            log_debug(f"GdkPixbuf probe failed (non-fatal): {type(e).__name__}: {e}")
-            return ""
-        return f"{width}x{height}" if width > 0 and height > 0 else ""
-
-    return ""
+    dimensions = _probe_gexiv2(path) if GExiv2 else ""
+    if not dimensions and GdkPixbuf:
+        if GExiv2:
+            log_debug("GExiv2 returned no dimensions; trying GdkPixbuf")
+        dimensions = _probe_gdkpixbuf(path)
+    return dimensions
 
 
 @functools.cache
