@@ -446,8 +446,43 @@ def _apply(file: Nautilus.FileInfo, info: MediaInfo) -> None:
     file.add_string_attribute("media_framerate", info.framerate)
 
 
+class _ProbeQueue:
+    """Probe cache misses from main-loop idle time, one per iteration, so Nautilus can redraw."""
+
+    def __init__(self) -> None:
+        self._pending: dict[str, tuple[Nautilus.FileInfo, pathlib.Path, int, int]] = {}
+        self._source_id = 0
+
+    def add(self, file: Nautilus.FileInfo, path: pathlib.Path, mtime_ns: int, size: int) -> None:
+        """Queue a file for probing; duplicates are ignored."""
+        key = str(path)
+        if key in self._pending:
+            return
+        self._pending[key] = (file, path, mtime_ns, size)
+        if not self._source_id:
+            self._source_id = GLib.idle_add(self._run_one)
+
+    def _run_one(self) -> bool:
+        """Probe the oldest queued file, cache it, and ask Nautilus to refresh it."""
+        key, (file, path, mtime_ns, size) = next(iter(self._pending.items()))
+        del self._pending[key]
+        try:
+            info = _probe(path)
+            _CACHE.put(key, mtime_ns, size, info)
+            file.invalidate_extension_info()
+        except Exception as e:  # noqa: BLE001 - main-loop callback boundary
+            log_error(f"Probe failed for {path}: {type(e).__name__}: {e}")
+        if self._pending:
+            return GLib.SOURCE_CONTINUE
+        self._source_id = 0
+        return GLib.SOURCE_REMOVE
+
+
+_PROBES = _ProbeQueue()
+
+
 def _fill_columns(file: Nautilus.FileInfo) -> None:
-    """Resolve, probe (or read from cache), and apply media columns for one file."""
+    """Apply cached media columns for one file; queue a probe on a cache miss."""
     path = _local_path(file)
     if path is None:
         return
@@ -459,8 +494,8 @@ def _fill_columns(file: Nautilus.FileInfo) -> None:
     mtime_ns, size = stat_result.st_mtime_ns, stat_result.st_size
     info = _CACHE.get(key, mtime_ns, size)
     if info is None:
-        info = _probe(path)
-        _CACHE.put(key, mtime_ns, size, info)
+        _PROBES.add(file, path, mtime_ns, size)
+        info = MediaInfo()
     _apply(file, info)
 
 
