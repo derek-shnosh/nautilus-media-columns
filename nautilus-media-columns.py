@@ -113,6 +113,8 @@ CACHE_DB = CACHE_DIR / "media.sqlite3"
 _MEM_CACHE_MAX = 2048
 
 COMMIT_EVERY = 50
+COMMIT_DELAY_S = 2
+_commit_source_id = 0
 
 # Globals
 _DISCOVERER = None
@@ -177,6 +179,30 @@ def _get_db() -> sqlite3.Connection:
     return _DB
 
 
+def _commit_pending() -> bool:
+    """Commit pending cache writes; runs from the GLib main loop."""
+    global _pending_writes, _commit_source_id
+    _commit_source_id = 0
+    if _DB is not None and _pending_writes:
+        try:
+            _DB.commit()
+            log_debug(f"Commit: {_pending_writes} pending writes")
+            _pending_writes = 0
+        except sqlite3.Error as e:
+            log_warn(f"SQLite commit failed (non-fatal): {type(e).__name__}: {e}")
+    return GLib.SOURCE_REMOVE
+
+
+def _note_write() -> None:
+    """Count a pending write; commit at the threshold, else schedule a delayed commit."""
+    global _pending_writes, _commit_source_id
+    _pending_writes += 1
+    if _pending_writes >= COMMIT_EVERY:
+        _commit_pending()
+    elif not _commit_source_id:
+        _commit_source_id = GLib.timeout_add_seconds(COMMIT_DELAY_S, _commit_pending)
+
+
 def _flush_and_close_db() -> None:
     """Write any pending cache data and close the database."""
     global _DB, _pending_writes
@@ -221,7 +247,6 @@ def _mem_cache_put(path: str, mtime_ns: int, size: int, info: MediaInfo) -> None
 
 def _cache_get(path: str, mtime_ns: int, size: int) -> MediaInfo | None:
     """Get cached values for a file if they are still valid."""
-    global _pending_writes
     cached = _MEM_CACHE.get(path)
     if cached and cached[0] == mtime_ns and cached[1] == size:
         log_debug(f"Cache hit (mem): {path}")
@@ -251,11 +276,7 @@ def _cache_get(path: str, mtime_ns: int, size: int) -> MediaInfo | None:
             "UPDATE cache SET last_access_ns=? WHERE path=?",
             (time.time_ns(), path),
         )
-        _pending_writes += 1
-        if _pending_writes >= COMMIT_EVERY:
-            log_debug(f"DB commit threshold reached: {_pending_writes}")
-            conn.commit()
-            _pending_writes = 0
+        _note_write()
     except sqlite3.Error as e:
         log_debug(f"Cache last_access update failed (non-fatal): {type(e).__name__}: {e}")
 
@@ -266,7 +287,6 @@ def _cache_get(path: str, mtime_ns: int, size: int) -> MediaInfo | None:
 
 def _cache_put(path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
     """Save media metadata to the cache."""
-    global _pending_writes
     _mem_cache_put(path, mtime_ns, size, info)
 
     try:
@@ -275,18 +295,13 @@ def _cache_put(path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
             "INSERT OR REPLACE INTO cache(path,mtime_ns,size,dims,dur,fps,last_access_ns) VALUES(?,?,?,?,?,?,?)",
             (path, mtime_ns, size, *info, time.time_ns()),
         )
-        _pending_writes += 1
-        if _pending_writes >= COMMIT_EVERY:
-            log_debug(f"DB commit threshold reached: {_pending_writes}")
-            conn.commit()
-            _pending_writes = 0
+        _note_write()
     except sqlite3.Error as e:
         log_debug(f"Cache put failed (non-fatal): {type(e).__name__}: {e}")
 
 
 def _cache_prune(conn: sqlite3.Connection) -> None:
     """Remove stale or excess cache entries based on age and total size limits."""
-    global _pending_writes
     now = time.time_ns()
     cutoff = now - (CACHE_TTL_DAYS * 24 * 60 * 60 * 1_000_000_000)
     deleted = 0
@@ -305,7 +320,7 @@ def _cache_prune(conn: sqlite3.Connection) -> None:
         deleted += max(0, delete_cursor.rowcount or 0)
         if deleted:
             log_info(f"Cache pruned: {deleted} rows removed")
-            _pending_writes += 1
+            _note_write()
         else:
             log_debug("Cache prune: no rows removed")
     except sqlite3.Error as e:
