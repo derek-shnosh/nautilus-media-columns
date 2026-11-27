@@ -365,30 +365,30 @@ def _probe_image(path: str) -> str:
         try:
             metadata = GExiv2.Metadata.new()
             metadata.open_path(path)
-            width = int(metadata.get_pixel_width() or 0)
-            height = int(metadata.get_pixel_height() or 0)
-            if width <= 0 or height <= 0:
-                return ""
-            if metadata.get_orientation() in (
-                GExiv2.Orientation.ROT_90,
-                GExiv2.Orientation.ROT_270,
-                GExiv2.Orientation.ROT_90_HFLIP,
-                GExiv2.Orientation.ROT_90_VFLIP,
-            ):
-                width, height = height, width
-                log_debug("Image orientation swap applied")
-            return f"{width}x{height}"
-        except (GLib.Error, ValueError) as e:
+        except GLib.Error as e:
             log_debug(f"GExiv2 probe failed (non-fatal): {type(e).__name__}: {e}")
             return ""
+        width = metadata.get_pixel_width()
+        height = metadata.get_pixel_height()
+        if width <= 0 or height <= 0:
+            return ""
+        if metadata.get_orientation() in (
+            GExiv2.Orientation.ROT_90,
+            GExiv2.Orientation.ROT_270,
+            GExiv2.Orientation.ROT_90_HFLIP,
+            GExiv2.Orientation.ROT_90_VFLIP,
+        ):
+            width, height = height, width
+            log_debug("Image orientation swap applied")
+        return f"{width}x{height}"
 
     if IMAGE_BACKEND == "GdkPixbuf":
         try:
             _, width, height = GdkPixbuf.Pixbuf.get_file_info(path)
-            return f"{width}x{height}" if width > 0 and height > 0 else ""
         except GLib.Error as e:
             log_debug(f"GdkPixbuf probe failed (non-fatal): {type(e).__name__}: {e}")
             return ""
+        return f"{width}x{height}" if width > 0 and height > 0 else ""
 
     return ""
 
