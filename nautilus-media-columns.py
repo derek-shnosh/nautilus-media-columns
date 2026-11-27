@@ -163,7 +163,7 @@ class _Cache:
         if not row:
             log_debug(f"Cache miss (db): {path}")
             return None
-        if int(row[0]) != mtime_ns or int(row[1]) != size:
+        if row[0] != mtime_ns or row[1] != size:
             log_debug(f"Cache stale: {path}")
             return None
 
@@ -233,14 +233,6 @@ class _Cache:
             )
             """
         )
-        try:
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(cache)").fetchall()}
-            if "last_access_ns" not in cols:
-                log_info("Upgrading cache schema: adding last_access_ns")
-                conn.execute("ALTER TABLE cache ADD COLUMN last_access_ns INTEGER NOT NULL DEFAULT 0")
-                conn.commit()
-        except sqlite3.Error as e:
-            log_debug(f"SQLite schema check/upgrade failed (non-fatal): {type(e).__name__}: {e}")
 
         self._conn = conn
         self._prune()
@@ -252,17 +244,17 @@ class _Cache:
         deleted = 0
         try:
             cur = self._conn.execute(
-                "DELETE FROM cache WHERE last_access_ns > 0 AND last_access_ns < ?",
+                "DELETE FROM cache WHERE last_access_ns < ?",
                 (cutoff,),
             )
-            deleted += max(0, cur.rowcount or 0)
+            deleted += cur.rowcount
             cur = self._conn.execute(
                 "DELETE FROM cache WHERE rowid IN ("
                 "SELECT rowid FROM cache ORDER BY last_access_ns ASC LIMIT ("
                 "SELECT MAX(0, COUNT(*)-?) FROM cache))",
                 (CACHE_MAX_ROWS,),
             )
-            deleted += max(0, cur.rowcount or 0)
+            deleted += cur.rowcount
         except sqlite3.Error as e:
             log_debug(f"Cache prune failed (non-fatal): {type(e).__name__}: {e}")
             return
