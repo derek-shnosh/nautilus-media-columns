@@ -107,8 +107,8 @@ DB_TIMEOUT_S = 2.0
 DB_BUSY_TIMEOUT_MS = 2000
 CACHE_TTL_DAYS = 90
 CACHE_MAX_ROWS = 50000
-CACHE_DIR = os.path.join(os.path.expanduser("~/.cache"), "nautilus-media-columns")
-CACHE_DB = os.path.join(CACHE_DIR, "media.sqlite3")
+CACHE_DIR = pathlib.Path.home() / ".cache" / "nautilus-media-columns"
+CACHE_DB = CACHE_DIR / "media.sqlite3"
 
 # In-process cache to avoid repeated SQLite hits while Nautilus is running
 _MEM_CACHE_MAX = 2048
@@ -141,7 +141,7 @@ def _get_db() -> sqlite3.Connection:
     if _DB is not None:
         return _DB
 
-    pathlib.Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     log_info(f"Opening cache DB: {CACHE_DB}")
     conn = sqlite3.connect(CACHE_DB, timeout=DB_TIMEOUT_S)
     try:
@@ -201,17 +201,18 @@ def _flush_and_close_db() -> None:
 atexit.register(_flush_and_close_db)
 
 
+class MediaInfo(NamedTuple):
+    """Probed media metadata; empty strings mean unknown."""
+
+    dimensions: str = ""
+    duration: str = ""
+    framerate: str = ""
+
+
 # Cache
-def _mem_cache_put(
-    path: str,
-    mtime_ns: int,
-    size: int,
-    dimensions: str,
-    duration: str,
-    framerate: str,
-) -> None:
+def _mem_cache_put(path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
     """Save a cache entry in memory for fast reuse."""
-    _MEM_CACHE[path] = (mtime_ns, size, dimensions, duration, framerate)
+    _MEM_CACHE[path] = (mtime_ns, size, info)
     if len(_MEM_CACHE) > _MEM_CACHE_MAX:
         # FIFO eviction (dict keeps insertion order in Python 3.7+)
         evicted = next(iter(_MEM_CACHE))
@@ -219,13 +220,13 @@ def _mem_cache_put(
         log_debug(f"Mem-cache evicted: {evicted}")
 
 
-def _cache_get(path: str, mtime_ns: int, size: int) -> tuple[str, str, str] | None:
+def _cache_get(path: str, mtime_ns: int, size: int) -> MediaInfo | None:
     """Get cached values for a file if they are still valid."""
     global _pending_writes
     cached = _MEM_CACHE.get(path)
     if cached and cached[0] == mtime_ns and cached[1] == size:
         log_debug(f"Cache hit (mem): {path}")
-        return cached[2], cached[3], cached[4]
+        return cached[2]
 
     try:
         conn = _get_db()
@@ -245,7 +246,7 @@ def _cache_get(path: str, mtime_ns: int, size: int) -> tuple[str, str, str] | No
         log_debug(f"Cache stale: {path}")
         return None
 
-    dimensions, duration, framerate = row[2] or "", row[3] or "", row[4] or ""
+    info = MediaInfo(row[2] or "", row[3] or "", row[4] or "")
     try:
         conn.execute(
             "UPDATE cache SET last_access_ns=? WHERE path=?",
@@ -259,28 +260,21 @@ def _cache_get(path: str, mtime_ns: int, size: int) -> tuple[str, str, str] | No
     except sqlite3.Error as e:
         log_debug(f"Cache last_access update failed (non-fatal): {type(e).__name__}: {e}")
 
-    _mem_cache_put(path, mtime_ns, size, dimensions, duration, framerate)
+    _mem_cache_put(path, mtime_ns, size, info)
     log_debug(f"Cache hit (db): {path}")
-    return dimensions, duration, framerate
+    return info
 
 
-def _cache_put(
-    path: str,
-    mtime_ns: int,
-    size: int,
-    dimensions: str,
-    duration: str,
-    framerate: str,
-) -> None:
+def _cache_put(path: str, mtime_ns: int, size: int, info: MediaInfo) -> None:
     """Save media metadata to the cache."""
     global _pending_writes
-    _mem_cache_put(path, mtime_ns, size, dimensions, duration, framerate)
+    _mem_cache_put(path, mtime_ns, size, info)
 
     try:
         conn = _get_db()
         conn.execute(
             "INSERT OR REPLACE INTO cache(path,mtime_ns,size,dims,dur,fps,last_access_ns) VALUES(?,?,?,?,?,?,?)",
-            (path, mtime_ns, size, dimensions, duration, framerate, time.time_ns()),
+            (path, mtime_ns, size, *info, time.time_ns()),
         )
         _pending_writes += 1
         if _pending_writes >= COMMIT_EVERY:
@@ -397,21 +391,13 @@ def _get_discoverer():
     return _DISCOVERER
 
 
-class VideoMetadata(NamedTuple):
-    """Container for probed video metadata returned by _probe_video()."""
-
-    duration: str
-    dimensions: str
-    framerate: str
-
-
-def _probe_video(path: str) -> VideoMetadata:
+def _probe_video(path: str) -> MediaInfo:
     """Read video duration, size, and framerate using GStreamer."""
     log_debug(f"Probe video: {path}")
     uri = Gst.filename_to_uri(path)
     discoverer = _get_discoverer()
     if discoverer is None:
-        return VideoMetadata("", "", "")
+        return MediaInfo()
 
     start_ns = time.time_ns()
     try:
@@ -420,7 +406,7 @@ def _probe_video(path: str) -> VideoMetadata:
         # GStreamer GI bindings can raise inconsistent exceptions.
         # Metadata is optional; never fail the file manager.
         log_warn(f"GStreamer discover failed (non-fatal): {type(e).__name__}: {e}")
-        return VideoMetadata("", "", "")
+        return MediaInfo()
     finally:
         # Always record probe timing (runs even if discover_uri fails or returns early)
         elapsed_ms = (time.time_ns() - start_ns) / 1_000_000
@@ -461,7 +447,7 @@ def _probe_video(path: str) -> VideoMetadata:
         break
 
     log_debug(f"Video probed -> dur='{duration}' dims='{dimensions}' fps='{framerate}'")
-    return VideoMetadata(duration, dimensions, framerate)
+    return MediaInfo(dimensions=dimensions, duration=duration, framerate=framerate)
 
 
 class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvider):
@@ -555,11 +541,12 @@ class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvid
             dimensions = _probe_image(path)
 
         if ext in VIDEO_EXTS:
-            duration, video_dimensions, framerate = _probe_video(path)
-            if video_dimensions:
-                dimensions = video_dimensions
+            video = _probe_video(path)
+            duration, framerate = video.duration, video.framerate
+            if video.dimensions:
+                dimensions = video.dimensions
 
-        _cache_put(path, mtime_ns, size, dimensions, duration, framerate)
+        _cache_put(path, mtime_ns, size, MediaInfo(dimensions, duration, framerate))
 
         if dimensions:
             file.add_string_attribute("media_dimensions", dimensions)
