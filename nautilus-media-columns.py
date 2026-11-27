@@ -87,7 +87,7 @@ def log_warn(msg):
 
 def log_error(msg):
     """Log an error message."""
-    _glib_log(GLib.LogLevelFlags.LEVEL_CRITICAL, msg)
+    _glib_log(GLib.LogLevelFlags.LEVEL_WARNING, msg)
     _journal(logging.ERROR, msg)
 
 
