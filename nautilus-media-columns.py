@@ -1,7 +1,6 @@
 """Nautilus extension adding Dimensions, Duration, and FPS columns for media files."""
 
 import atexit
-import os
 import pathlib
 import sqlite3
 import time
@@ -450,6 +449,39 @@ def _probe_video(path: str) -> MediaInfo:
     return MediaInfo(dimensions=dimensions, duration=duration, framerate=framerate)
 
 
+def _local_path(file: Nautilus.FileInfo) -> pathlib.Path | None:
+    """Return the file's local path if it is a supported regular media file."""
+    if file.get_uri_scheme() != "file":
+        return None  # skip smb://, trash://, etc.
+    location = file.get_location()
+    raw = location.get_path() if location else None
+    if not raw:
+        return None  # virtual/search results, or no local backing
+    path = pathlib.Path(raw)
+    if not path.is_file():
+        return None
+    ext = path.suffix.lower()
+    if ext not in SUPPORTED_EXTS:
+        if ext:
+            log_debug(f"Skip: unsupported ext '{ext}' ({path})")
+        return None
+    return path
+
+
+def _probe(path: pathlib.Path) -> MediaInfo:
+    """Probe a file for media metadata based on its extension."""
+    if path.suffix.lower() in VIDEO_EXTS:
+        return _probe_video(str(path))
+    return MediaInfo(dimensions=_probe_image(str(path)))
+
+
+def _apply(file: Nautilus.FileInfo, info: MediaInfo) -> None:
+    """Set the media column attributes on a Nautilus file."""
+    file.add_string_attribute("media_dimensions", info.dimensions)
+    file.add_string_attribute("media_duration", info.duration)
+    file.add_string_attribute("media_framerate", info.framerate)
+
+
 class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvider):
     """Extension: Adds media metadata columns to Nautilus."""
 
@@ -484,73 +516,17 @@ class MediaColumns(GObject.GObject, Nautilus.ColumnProvider, Nautilus.InfoProvid
     # Called once per file by Nautilus
     def update_file_info(self, file: Nautilus.FileInfo, *_unused) -> None:
         """Fill in media columns for one file."""
-        # Only handle local filesystem URIs (skip smb://, trash://, etc.)
-        if file.get_uri_scheme() != "file":
+        path = _local_path(file)
+        if path is None:
             return
-
-        # Resolve Nautilus FileInfo to a Gio.File
-        location = file.get_location()
-        if location is None:
-            return  # No resolvable location (virtual/search results)
-
-        # Convert Gio.File to a POSIX path
-        path = location.get_path()
-        if not path:
-            return  # Not backed by a real local path
-
-        # Only process regular files (excludes directories, symlinks to dirs, devices, etc.)
-        if not os.path.isfile(path):
-            return
-
-        _, ext = os.path.splitext(path)
-        ext = ext.lower()
-
-        if ext not in SUPPORTED_EXTS:
-            if ext == "":
-                return  # skip extensionless files quietly
-            log_debug(f"Skip: unsupported ext '{ext}' ({path})")
-            return
-
-        file.add_string_attribute("media_dimensions", "")
-        file.add_string_attribute("media_duration", "")
-        file.add_string_attribute("media_framerate", "")
-
         try:
-            stat_result = os.stat(path)
-            mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1e9))
-            size = int(stat_result.st_size)
+            stat_result = path.stat()
         except OSError:
             return
-
-        cached_entry = _cache_get(path, mtime_ns, size)
-        if cached_entry is not None:
-            dimensions, duration, framerate = cached_entry
-            if dimensions:
-                file.add_string_attribute("media_dimensions", dimensions)
-            if duration:
-                file.add_string_attribute("media_duration", duration)
-            if framerate:
-                file.add_string_attribute("media_framerate", framerate)
-            return
-
-        dimensions = ""
-        duration = ""
-        framerate = ""
-
-        if ext in IMAGE_EXTS:
-            dimensions = _probe_image(path)
-
-        if ext in VIDEO_EXTS:
-            video = _probe_video(path)
-            duration, framerate = video.duration, video.framerate
-            if video.dimensions:
-                dimensions = video.dimensions
-
-        _cache_put(path, mtime_ns, size, MediaInfo(dimensions, duration, framerate))
-
-        if dimensions:
-            file.add_string_attribute("media_dimensions", dimensions)
-        if duration:
-            file.add_string_attribute("media_duration", duration)
-        if framerate:
-            file.add_string_attribute("media_framerate", framerate)
+        key = str(path)
+        mtime_ns, size = stat_result.st_mtime_ns, stat_result.st_size
+        info = _cache_get(key, mtime_ns, size)
+        if info is None:
+            info = _probe(path)
+            _cache_put(key, mtime_ns, size, info)
+        _apply(file, info)
