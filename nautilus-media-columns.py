@@ -1,6 +1,7 @@
 """Nautilus extension adding Dimensions, Duration, and FPS columns for media files."""
 
 import atexit
+import functools
 import logging
 import pathlib
 import sqlite3
@@ -128,7 +129,6 @@ COMMIT_DELAY_S = 2
 _commit_source_id = 0
 
 # Globals
-_DISCOVERER = None
 IMAGE_BACKEND = None
 _MEM_CACHE = {}
 _DB = None
@@ -393,17 +393,16 @@ def _probe_image(path: str) -> str:
     return ""
 
 
+@functools.cache
 def _get_discoverer():
-    """Create and reuse a GStreamer discoverer when needed."""
-    global _DISCOVERER
-    if _DISCOVERER is None:
-        try:
-            _DISCOVERER = GstPbutils.Discoverer.new(DISCOVER_TIMEOUT_NS)
-            log_info("Created GStreamer discoverer")
-        except GLib.Error as e:
-            log_warn(f"Failed to create GStreamer discoverer: {type(e).__name__}: {e}")
-            _DISCOVERER = None
-    return _DISCOVERER
+    """Create the GStreamer discoverer once; None if it can't be created."""
+    try:
+        discoverer = GstPbutils.Discoverer.new(DISCOVER_TIMEOUT_NS)
+    except GLib.Error as e:
+        log_warn(f"Failed to create GStreamer discoverer: {type(e).__name__}: {e}")
+        return None
+    log_info("Created GStreamer discoverer")
+    return discoverer
 
 
 def _probe_video(path: str) -> MediaInfo:
